@@ -1,0 +1,80 @@
+# Stalwart Mail Server configuration - BROKEN baseline.
+#
+# This config reflects the operator's current state when JMAP push hangs.
+# The HTTPS listener binds inside the container on 8080 (plaintext, because
+# TLS is terminated at the cloudflared layer), but Stalwart has NOT been told
+# what its public URL is and has NOT been told to trust the X-Forwarded-Proto
+# header from the tunnel.
+#
+# Result: the JMAP /session response advertises api_url, download_url,
+# upload_url, and event_source_url derived from the default base URL, which
+# does not match the tunnel hostname, and JMAP clients try to connect to
+# unreachable endpoints.
+
+[server]
+hostname = "mail.example.com"
+
+# --- HTTP / JMAP / webmail listener ---------------------------------------
+# Bound on plaintext HTTP because TLS is offloaded to the tunnel.
+[server.listener.http]
+bind = ["[::]:8080"]
+protocol = "http"
+
+# --- SMTP listeners --------------------------------------------------------
+[server.listener.smtp]
+bind = ["[::]:25"]
+protocol = "smtp"
+
+[server.listener.submission]
+bind = ["[::]:587"]
+protocol = "smtp"
+
+# --- IMAP listeners --------------------------------------------------------
+[server.listener.imap]
+bind = ["[::]:143"]
+protocol = "imap"
+
+# --- HTTP base URL configuration ------------------------------------------
+# The single config knob that controls the URLs Stalwart advertises in the
+# JMAP /session response. Currently NOT set, so Stalwart falls back to a
+# default that uses the container's internal hostname, which is unreachable
+# through the tunnel. THIS IS THE LOAD BEARING FIX.
+#
+# url_https = "https://mail.example.com"
+
+# Whether to trust X-Forwarded-Proto, X-Forwarded-For, etc. from the proxy.
+# Currently false, so even if a forwarding header is present it is ignored.
+use_x_forwarded = false
+
+# --- JMAP long lived stream tuning ----------------------------------------
+# Defaults. Event source and websocket push will be subject to whatever
+# buffering / idle timeouts the tunnel applies.
+[jmap]
+event_source_throttle = "1s"
+websocket_throttle = "1s"
+websocket_heartbeat = "60s"
+websocket_timeout = "10m"
+
+# --- Storage --------------------------------------------------------------
+[store.default]
+type = "rocksdb"
+path = "/var/lib/stalwart/data"
+
+[storage]
+data = "default"
+fts = "default"
+blob = "default"
+lookup = "default"
+directory = "internal"
+
+[directory.internal]
+type = "internal"
+store = "default"
+
+[authentication.fallback-admin]
+user = "admin"
+secret = "changeme-rotate-on-first-login"
+
+[logger.default]
+level = "info"
+format = "json"

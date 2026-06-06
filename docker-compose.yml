@@ -1,0 +1,55 @@
+# Stalwart Mail Server deployment behind a Cloudflare Tunnel.
+#
+# This is the BROKEN baseline that mirrors the failure the operator described:
+# webmail and SMTP work, but JMAP push silently hangs after the session call.
+# The model is expected to produce the corrected version of this file alongside
+# the corrected stalwart config and cloudflared config.
+
+services:
+
+  stalwart:
+    image: stalwart/stalwart:latest
+    container_name: stalwart
+    restart: unless-stopped
+    # SMTP and IMAP/POP3 are bound on the host because cloudflare tunnel does
+    # not proxy non-HTTP traffic. The HTTPS / JMAP port is NOT bound on the
+    # host because cloudflared will reach it via the shared mail network.
+    ports:
+      - "25:25"      # smtp
+      - "465:465"    # smtps
+      - "587:587"    # submission
+      - "143:143"    # imap
+      - "993:993"    # imaps
+      - "110:110"    # pop3
+      - "995:995"    # pop3s
+    volumes:
+      - ./stalwart/config.toml:/etc/stalwart/config.toml:ro
+      - stalwart-data:/var/lib/stalwart
+    environment:
+      TZ: UTC
+    networks:
+      - mail
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      # The tunnel credentials file is provisioned out of band via
+      #   cloudflared tunnel create stalwart-mail
+      # and mounted in here. Replace with your tunnel ID.
+      - ./cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
+    depends_on:
+      - stalwart
+    networks:
+      - mail
+
+networks:
+  mail:
+    driver: bridge
+
+volumes:
+  stalwart-data:
+    driver: local

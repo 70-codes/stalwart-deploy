@@ -1,0 +1,23 @@
+# Cloudflare Tunnel config - BROKEN baseline.
+#
+# This is the minimum-viable cloudflared config: one ingress rule pointing
+# at the Stalwart container on the shared docker network, no originRequest
+# options. It "works" for the JMAP /session POST (a normal short HTTP call)
+# but does not survive long lived event source or websocket push streams,
+# because cloudflared's default behavior buffers chunked HTTP responses and
+# does not negotiate HTTP/2 to the origin.
+#
+# The credentials.json mounted by the compose file is provisioned by:
+#   cloudflared tunnel login
+#   cloudflared tunnel create stalwart-mail
+#   cp ~/.cloudflared/<tunnel-id>.json ./cloudflared/credentials.json
+# and the tunnel hostname is associated with the tunnel via:
+#   cloudflared tunnel route dns stalwart-mail mail.example.com
+
+tunnel: stalwart-mail
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: mail.example.com
+    service: http://stalwart:8080
+  - service: http_status:404
