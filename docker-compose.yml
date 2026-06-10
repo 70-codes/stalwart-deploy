@@ -51,6 +51,10 @@ services:
       # the [server.http].url / [server] hostname in stalwart/config.toml.
       STALWART_HOSTNAME: mail.example.com
       STALWART_PUBLIC_URL: https://mail.example.com
+      # Fixed admin credential so bootstrap-listeners (below) can call the
+      # JMAP management API without scraping a one-time generated password
+      # out of the container logs. Rotate this after first login.
+      STALWART_RECOVERY_ADMIN: admin:changeme-rotate-on-first-login
     healthcheck:
       # Overrides the image's built-in /healthz/live check, which passes even
       # in bootstrap/recovery mode (server up but STALWART_PUBLIC_URL ignored).
@@ -77,6 +81,37 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    networks:
+      - mail
+
+  # One-shot init: v0.16's default bootstrap only creates implicit-TLS mail
+  # listeners (465/993/995) - the plaintext STARTTLS "submission" (587) and
+  # "imap" (143) listeners that stalwart/config.toml used to define are gone
+  # now that config.toml isn't read, even though docker-compose still maps
+  # those host ports. This creates the missing NetworkListener objects via
+  # the JMAP Registry API (x:NetworkListener/set) and restarts `stalwart` so
+  # they bind. Idempotent: on subsequent `up`s it finds the listeners already
+  # persisted in the data store and does nothing.
+  #
+  # Requires the docker socket to restart `stalwart` after creating the
+  # listeners (new listeners only bind at process start). This grants the
+  # container control over the whole Docker host - acceptable for a
+  # single-host team deployment, but consider routing it through a scoped
+  # proxy (e.g. tecnativa/docker-socket-proxy, RESTART-only) if that's a
+  # concern in your environment.
+  bootstrap-listeners:
+    image: docker:cli
+    container_name: bootstrap-listeners
+    restart: "no"
+    environment:
+      STALWART_RECOVERY_ADMIN: admin:changeme-rotate-on-first-login
+      STALWART_CONTAINER: stalwart
+    volumes:
+      - ./scripts/bootstrap_listeners.sh:/bootstrap.sh:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["sh", "/bootstrap.sh"]
+    depends_on:
+      - stalwart
     networks:
       - mail
 
