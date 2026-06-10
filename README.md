@@ -14,16 +14,116 @@ proxy.
 ```
 .
 ├── docker-compose.yml             # Stalwart + cloudflared sidecar on a shared bridge
+├── env.example                    # Copy to .env — set STALWART_PUBLIC_URL here
 ├── stalwart/
-│   └── config.toml                # Stalwart config (url_https commented out, use_x_forwarded = false)
+│   ├── config.json                # Data-store bootstrap pointer (RocksDB path only)
+│   └── config.toml                # Human-readable settings mirror ([server.http].url, use-x-forwarded)
 ├── cloudflared/
-│   └── config.yml                 # Default tunnel ingress, no originRequest options
+│   └── config.yml                 # Tunnel ingress with originRequest keep-alive options
 └── scripts/
-    └── test_jmap.sh               # curl-based JMAP smoke test that reproduces the hang
+    └── test_jmap.sh               # curl-based JMAP smoke test
 ```
 
 The cloudflared credentials JSON file is provisioned out of band (see "How to
 reproduce" below) and not committed.
+
+## Why does this work
+
+Two bugs were stacked on top of each other. Either one alone was enough to
+produce the "session returns 200, nothing else hits the server" symptom.
+
+### Bug 1 — config.json filename mismatch caused permanent bootstrap suppression
+
+The image entrypoint is:
+
+```
+/usr/local/bin/stalwart --config /etc/stalwart/config.json
+```
+
+The original compose file mounted `stalwart/config.toml` at
+`/etc/stalwart/config.toml`. The binary never saw it and fell into
+**bootstrap / recovery mode** — an ephemeral in-memory store used for the
+initial setup wizard — on every single restart.
+
+In recovery mode Stalwart's HTTP config is set in
+`crates/common/src/config/network.rs`:
+
+```rust
+url_https: if !bp.registry.is_recovery_mode() {
+    if let Some(url) = bp.registry.public_url() {  // STALWART_PUBLIC_URL
+        url.to_string()
+    } else {
+        format!("https://{server_name}")            // fallback: container hostname
+    }
+} else {
+    String::new()  // recovery mode: base URL always empty, env var bypassed
+},
+```
+
+`STALWART_PUBLIC_URL` was silently discarded on every restart. The JMAP
+session response emitted relative paths (`/jmap/`) or, depending on client
+behaviour, resolved them against the container's random hostname — either way
+unreachable from outside Docker.
+
+The fix is `stalwart/config.json`:
+
+```json
+{ "@type": "RocksDb", "path": "/var/lib/stalwart/data" }
+```
+
+This four-line file is the only thing Stalwart v0.7+ reads from disk at
+startup. Every other setting — listeners, domains, accounts, SMTP rules — is
+stored inside the RocksDB data store and configured once via `/admin` after
+first boot. The compose file now mounts it at `/etc/stalwart/config.json`,
+the path the binary expects.
+
+### Bug 2 — STALWART_PUBLIC_URL not set, JMAP session advertised unreachable URLs
+
+Once the server is out of recovery mode, `STALWART_PUBLIC_URL` is read from
+the environment (`crates/store/src/registry/local.rs`):
+
+```rust
+env_public_url: std::env::var("STALWART_PUBLIC_URL")
+    .ok()
+    .map(|v| v.trim().trim_end_matches('/').to_string())
+    .filter(|u| !u.is_empty())
+```
+
+That value flows into `url_https`, which `Session::new` in
+`crates/jmap-proto/src/request/capability.rs` uses to construct every URL the
+server publishes:
+
+```rust
+api_url:          format!("{base_url}/jmap/"),
+download_url:     format!("{base_url}/jmap/download/..."),
+upload_url:       format!("{base_url}/jmap/upload/..."),
+event_source_url: format!("{base_url}/jmap/eventsource/..."),
+```
+
+Without the variable the fallback is `https://<container-hostname>`. A client
+that authenticated against `https://mail.example.com` reads the session body
+and then tries to `POST` to `https://stalwart/jmap/` — unreachable from the
+internet. Auth succeeds, then every subsequent request silently fails. Server
+access logs show one request and then nothing.
+
+`STALWART_PUBLIC_URL: https://mail.example.com` in `docker-compose.yml` (or
+`.env` copied from `env.example`) fixes this. The older TOML path —
+`[server.http] url = "https://mail.example.com"` in `stalwart/config.toml` —
+also sets the same value for pre-v0.7 deployments; keeping both is harmless.
+
+### SSE keep-alive for ongoing push
+
+The JMAP event source (`/jmap/eventsource/`) is a chunked HTTP/1.1
+Server-Sent Events stream. Cloudflare's edge drops connections idle for more
+than 100 seconds. Clients that request a ping interval (`?ping=60`) receive
+keep-alive frames from Stalwart every 60 seconds and survive the timeout.
+The `originRequest` block in `cloudflared/config.yml` adds TCP-level
+keep-alives and raises the pooled-connection timeout so the tunnel does not
+recycle long-lived push streams between frames.
+
+One thing intentionally absent: `http2Origin: true`. Stalwart's HTTP listener
+uses `hyper::server::conn::http1` — HTTP/1.1 only. Forcing HTTP/2 to the
+origin breaks the connection.
 
 ## Source code for understanding the failure path
 

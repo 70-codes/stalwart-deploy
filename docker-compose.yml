@@ -16,7 +16,7 @@
 services:
 
   stalwart:
-    image: stalwart/stalwart:latest
+    image: stalwartlabs/stalwart:latest
     container_name: stalwart
     restart: unless-stopped
     # SMTP and IMAP/POP3 are bound on the host because cloudflare tunnel does
@@ -31,7 +31,18 @@ services:
       - "110:110"    # pop3
       - "995:995"    # pop3s
     volumes:
-      - ./stalwart/config.toml:/etc/stalwart/config.toml:ro
+      # config.json is what the image actually reads on startup:
+      #   /usr/local/bin/stalwart --config /etc/stalwart/config.json
+      # It tells Stalwart where the RocksDB data store lives. All server
+      # settings (listeners, SMTP rules, JMAP config, etc.) are stored in
+      # the data store, configured once via /admin on first boot.
+      #
+      # The original deployment mounted config.toml at /etc/stalwart/config.toml
+      # — the binary never saw it and started in bootstrap/recovery mode on
+      # every restart. In recovery mode url_https is hardcoded to "" and
+      # STALWART_PUBLIC_URL is explicitly bypassed, so the JMAP session
+      # response advertised broken URLs regardless of what was in the env.
+      - ./stalwart/config.json:/etc/stalwart/config.json:ro
       - stalwart-data:/var/lib/stalwart
     environment:
       TZ: UTC
