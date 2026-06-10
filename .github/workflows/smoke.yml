@@ -1,0 +1,120 @@
+name: smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Both jobs are independent and run in parallel on separate runners.
+# Neither job starts cloudflared (it needs credentials.json that is not
+# committed); only the stalwart service is brought up in each case.
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Job 1 — happy path
+  # Start stalwart with the correct STALWART_PUBLIC_URL and assert that the
+  # healthcheck flips to "healthy" within 90 seconds.
+  # ---------------------------------------------------------------------------
+  smoke-healthy:
+    name: Healthcheck flips healthy with correct URL
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stalwart
+        run: docker compose up -d stalwart
+
+      - name: Wait ≤90 s for status=healthy
+        run: |
+          echo "Polling healthcheck every 5 s (timeout 90 s)…"
+          for i in $(seq 1 18); do
+            status=$(docker inspect stalwart \
+              --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)
+            printf "  t=%3ds  status=%s\n" "$((i * 5))" "$status"
+            [ "$status" = "healthy" ] && exit 0
+            sleep 5
+          done
+          echo ""
+          echo "FAILED: still '$status' after 90 s"
+          echo "--- stalwart logs (last 40 lines) ---"
+          docker logs stalwart --tail 40
+          echo "--- healthcheck probe log ---"
+          docker inspect stalwart \
+            --format '{{json .State.Health.Log}}' | python3 -m json.tool
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — negative / bootstrap-rejection path
+  # Start stalwart with STALWART_PUBLIC_URL deliberately empty (simulating a
+  # missing .env entry or a misconfigured deploy).  The healthcheck guard
+  # "[ -n $STALWART_PUBLIC_URL ]" should fire immediately on every probe,
+  # causing the container to reach "unhealthy" within the start_period +
+  # retries window (~60 s empirically).  This job PASSES when it sees
+  # "unhealthy" — that is the correct outcome.
+  # ---------------------------------------------------------------------------
+  smoke-bootstrap-rejected:
+    name: Healthcheck rejects empty STALWART_PUBLIC_URL
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create compose override that clears STALWART_PUBLIC_URL
+        # docker compose merges files in order; later files win for scalar
+        # values, so this override replaces the hardcoded URL with an empty
+        # string before the container is created.
+        run: |
+          cat > docker-compose.override.yml << 'EOF'
+          services:
+            stalwart:
+              environment:
+                STALWART_PUBLIC_URL: ""
+                STALWART_HOSTNAME: ""
+          EOF
+
+      - name: Start stalwart (empty URL)
+        run: docker compose up -d stalwart
+
+      - name: Wait ≤120 s for status=unhealthy
+        # The container must NOT become healthy.  The first time we observe
+        # "unhealthy" the job exits 0 — that is the proof the healthcheck
+        # is active and correctly rejects a missing public URL.
+        # If the container somehow becomes "healthy" the job exits 1.
+        run: |
+          echo "Polling healthcheck every 5 s (timeout 120 s)…"
+          for i in $(seq 1 24); do
+            status=$(docker inspect stalwart \
+              --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)
+            printf "  t=%3ds  status=%s\n" "$((i * 5))" "$status"
+
+            [ "$status" = "unhealthy" ] && {
+              echo ""
+              echo "PASSED: healthcheck correctly rejected empty STALWART_PUBLIC_URL"
+              exit 0
+            }
+
+            [ "$status" = "healthy" ] && {
+              echo ""
+              echo "FAILED: container became healthy despite empty STALWART_PUBLIC_URL"
+              echo "--- session apiUrl (should be absent or wrong) ---"
+              docker exec stalwart sh -c \
+                'curl -fs http://127.0.0.1:8080/jmap/session \
+                 | grep -o "\"apiUrl\":\"[^\"]*\""' || true
+              exit 1
+            }
+
+            sleep 5
+          done
+          echo ""
+          echo "FAILED: still '$status' after 120 s — never reached unhealthy"
+          echo "--- stalwart logs (last 40 lines) ---"
+          docker logs stalwart --tail 40
+          echo "--- healthcheck probe log ---"
+          docker inspect stalwart \
+            --format '{{json .State.Health.Log}}' | python3 -m json.tool
+          exit 1
