@@ -13,7 +13,7 @@ proxy.
 
 ```
 .
-├── docker-compose.yml             # Stalwart + cloudflared sidecar on a shared bridge
+├── docker-compose.yml             # Stalwart + cloudflared + bootstrap-listeners one-shot init, on a shared bridge
 ├── env.example                    # Copy to .env — set STALWART_PUBLIC_URL here
 ├── stalwart/
 │   ├── config.json                # Data-store bootstrap pointer (RocksDB path only)
@@ -21,7 +21,8 @@ proxy.
 ├── cloudflared/
 │   └── config.yml                 # Tunnel ingress with originRequest keep-alive options
 └── scripts/
-    └── test_jmap.sh               # curl-based JMAP smoke test
+    ├── test_jmap.sh               # curl-based JMAP smoke test
+    └── bootstrap_listeners.sh     # Run by the bootstrap-listeners service: creates the submission(587)/imap(143) NetworkListeners and restarts stalwart
 ```
 
 The cloudflared credentials JSON file is provisioned out of band (see "How to
