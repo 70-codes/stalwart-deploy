@@ -51,6 +51,32 @@ services:
       # the [server.http].url / [server] hostname in stalwart/config.toml.
       STALWART_HOSTNAME: mail.example.com
       STALWART_PUBLIC_URL: https://mail.example.com
+    healthcheck:
+      # Overrides the image's built-in /healthz/live check, which passes even
+      # in bootstrap/recovery mode (server up but STALWART_PUBLIC_URL ignored).
+      #
+      # This check does three things:
+      #   1. Fails immediately if STALWART_PUBLIC_URL is unset or empty, so a
+      #      missing env var is surfaced in the health status rather than
+      #      silently matching any apiUrl (an empty grep prefix matches all).
+      #   2. curl -f exits non-zero if /jmap/session returns a non-2xx status.
+      #   3. grep verifies that apiUrl in the JSON response starts with
+      #      STALWART_PUBLIC_URL, not an empty string or a relative path such
+      #      as "/jmap/" which is what bootstrap/recovery mode produces.
+      #
+      # $$ in compose YAML escapes to a literal $ passed to the container
+      # shell, where $$STALWART_PUBLIC_URL becomes $STALWART_PUBLIC_URL and is
+      # expanded to the running container's env var value at check time.
+      test:
+        - "CMD-SHELL"
+        - >-
+          [ -n "$$STALWART_PUBLIC_URL" ] &&
+          curl -fs http://127.0.0.1:8080/jmap/session
+          | grep -q "\"apiUrl\":\"$$STALWART_PUBLIC_URL"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       - mail
 

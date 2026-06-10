@@ -125,6 +125,84 @@ One thing intentionally absent: `http2Origin: true`. Stalwart's HTTP listener
 uses `hyper::server::conn::http1` — HTTP/1.1 only. Forcing HTTP/2 to the
 origin breaks the connection.
 
+## Rollback: what to do if STALWART_PUBLIC_URL is set wrong in production
+
+**Symptom:** JMAP clients hang after auth, same as the original bug. The
+healthcheck will show `unhealthy` within two failed intervals (60 s) which
+is the fastest signal.
+
+### Confirm the misconfiguration
+
+```sh
+# From outside the host — should print an absolute https:// URL for apiUrl
+curl -s https://mail.example.com/jmap/session | grep apiUrl
+
+# From the host itself — compare what the server is advertising vs what is set
+docker exec stalwart env | grep STALWART_PUBLIC_URL
+docker exec stalwart curl -fs http://127.0.0.1:8080/jmap/session | grep -o '"apiUrl":"[^"]*"'
+```
+
+If the two values don't match, or `apiUrl` is empty/relative, the variable is
+wrong.
+
+### Fix forward (preferred)
+
+Edit `.env` (or `docker-compose.yml` directly if you're not using `.env`),
+correct `STALWART_PUBLIC_URL`, then do a **zero-downtime environment reload**:
+
+```sh
+# docker compose re-creates only containers whose config changed
+docker compose up -d --force-recreate stalwart
+
+# Watch the healthcheck recover — should flip to healthy within ~90 s
+watch -n5 'docker inspect stalwart --format "{{.State.Health.Status}}"'
+```
+
+SMTP and IMAP connections are not affected; they use direct TCP ports that
+compose does not restart. Existing webmail sessions survive the recreate
+because the RocksDB data volume is unchanged.
+
+### Emergency rollback to the last known-good image
+
+If the URL was never correct and you want to roll back to the previous working
+image tag rather than editing the config:
+
+```sh
+# 1. Note the current image digest for later reference
+docker inspect stalwart --format '{{.Image}}'
+
+# 2. Pin the compose file to the previous tag, e.g.:
+#    image: stalwartlabs/stalwart:0.16.7
+# then:
+docker compose up -d --force-recreate stalwart
+```
+
+The RocksDB data store is version-locked to the Stalwart release that wrote
+it. Rolling forward to a higher minor version after a downgrade may require
+running `docker compose exec stalwart stalwart --migrate` first — check the
+Stalwart changelog before pinning a downgrade across a minor boundary.
+
+### Prevent recurrence
+
+The healthcheck in `docker-compose.yml` catches a wrong URL before clients do:
+
+```
+test: curl -fs http://127.0.0.1:8080/jmap/session
+      | grep -q '"apiUrl":"$STALWART_PUBLIC_URL'
+interval: 30s  retries: 3  start_period: 30s
+```
+
+After changing `STALWART_PUBLIC_URL`, run the smoke test before declaring the
+deploy healthy:
+
+```sh
+HOSTNAME_OVERRIDE=mail.example.com JMAP_USER=youruser JMAP_PASS=yourpass \
+  ./scripts/test_jmap.sh
+```
+
+The first phase of the test (`apiUrl` check) will immediately tell you whether
+the URL is correct without needing to open a JMAP client.
+
 ## Source code for understanding the failure path
 
 Stalwart's source lives at https://github.com/stalwartlabs/stalwart. The three
