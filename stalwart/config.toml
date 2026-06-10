@@ -1,15 +1,27 @@
-# Stalwart Mail Server configuration - BROKEN baseline.
+# Stalwart Mail Server configuration - FIXED.
 #
-# This config reflects the operator's current state when JMAP push hangs.
-# The HTTPS listener binds inside the container on 8080 (plaintext, because
-# TLS is terminated at the cloudflared layer), but Stalwart has NOT been told
-# what its public URL is and has NOT been told to trust the X-Forwarded-Proto
-# header from the tunnel.
+# Root cause of the JMAP hang: the HTTP listener binds inside the container
+# on 8080 (plaintext, because TLS is terminated at the cloudflared layer),
+# but Stalwart was never told what its PUBLIC url is and was not told to
+# trust the X-Forwarded-* headers coming from the tunnel.
 #
-# Result: the JMAP /session response advertises api_url, download_url,
-# upload_url, and event_source_url derived from the default base URL, which
-# does not match the tunnel hostname, and JMAP clients try to connect to
-# unreachable endpoints.
+# Without [server.http].url set, the JMAP /session response advertises
+# api_url, download_url, upload_url and event_source_url built from
+# Stalwart's idea of its own hostname - which inside a container is the
+# random container id, not "mail.example.com". The session call itself
+# still returns 200 (cloudflared can reach that endpoint fine), but every
+# JMAP client then tries to open the *advertised* apiUrl/eventSourceUrl
+# against an address that doesn't exist anywhere outside the container,
+# so "nothing else hits the server" and the client just hangs.
+#
+# NOTE for operators on Stalwart v0.16+: the management/JMAP-registry
+# rewrite moved most of this out of config.toml. The same fix is applied
+# redundantly via the STALWART_PUBLIC_URL / STALWART_HOSTNAME environment
+# variables in docker-compose.yml (which v0.16+ reads directly), and
+# "Trust X-Forwarded headers" must additionally be enabled once via the
+# WebUI/CLI (Settings -> Network -> HTTP) since v0.16 stores that as a
+# managed object rather than a config.toml key. Keeping both in place is
+# harmless and covers both config generations.
 
 [server]
 hostname = "mail.example.com"
@@ -35,20 +47,31 @@ bind = ["[::]:143"]
 protocol = "imap"
 
 # --- HTTP base URL configuration ------------------------------------------
-# The single config knob that controls the URLs Stalwart advertises in the
-# JMAP /session response. Currently NOT set, so Stalwart falls back to a
-# default that uses the container's internal hostname, which is unreachable
-# through the tunnel. THIS IS THE LOAD BEARING FIX.
+# THIS IS THE LOAD BEARING FIX.
 #
-# url_https = "https://mail.example.com"
+# `url` is the single config knob that controls api_url, download_url,
+# upload_url and event_source_url in the JMAP /session response (and the
+# JMAP autoconfig/autodiscover URL, OAuth issuer, etc). It must be the
+# externally reachable HTTPS URL that the Cloudflare Tunnel terminates -
+# i.e. the same hostname configured under `ingress` in
+# cloudflared/config.yml.
+[server.http]
+url = "https://mail.example.com"
 
-# Whether to trust X-Forwarded-Proto, X-Forwarded-For, etc. from the proxy.
-# Currently false, so even if a forwarding header is present it is ignored.
-use_x_forwarded = false
+# Trust X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host sent by
+# cloudflared. Without this, Stalwart sees every request as coming from the
+# cloudflared container's IP over plain HTTP, which breaks per-client rate
+# limiting/brute-force protection and scheme-sensitive behaviour (cookies,
+# HSTS, OAuth redirect validation).
+use-x-forwarded = true
 
 # --- JMAP long lived stream tuning ----------------------------------------
-# Defaults. Event source and websocket push will be subject to whatever
-# buffering / idle timeouts the tunnel applies.
+# event_source_throttle/websocket_throttle batch rapid-fire change
+# notifications; websocket_heartbeat/websocket_timeout bound how long an
+# idle push connection is kept open. cloudflared/config.yml's
+# originRequest.keepAliveTimeout is set comfortably above
+# websocket_timeout so the tunnel doesn't recycle the connection out from
+# under a still-open websocket/eventsource stream.
 [jmap]
 event_source_throttle = "1s"
 websocket_throttle = "1s"

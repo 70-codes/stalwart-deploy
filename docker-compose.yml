@@ -1,9 +1,17 @@
-# Stalwart Mail Server deployment behind a Cloudflare Tunnel.
+# Stalwart Mail Server deployment behind a Cloudflare Tunnel - FIXED.
 #
-# This is the BROKEN baseline that mirrors the failure the operator described:
-# webmail and SMTP work, but JMAP push silently hangs after the session call.
-# The model is expected to produce the corrected version of this file alongside
-# the corrected stalwart config and cloudflared config.
+# This mirrors the failure the operator described: webmail and SMTP worked,
+# but JMAP push silently hung after the session call because the JMAP
+# /session response advertised URLs pointing at the container's internal
+# hostname instead of the Cloudflare Tunnel hostname.
+#
+# STALWART_PUBLIC_URL / STALWART_HOSTNAME are the env vars current Stalwart
+# releases (v0.16+) use to compose every advertised JMAP/OAuth/autoconfig
+# URL - they are read on every boot, independent of config.toml/config.json
+# content, so set them here as the primary fix. stalwart/config.toml carries
+# the equivalent [server.http].url / use-x-forwarded fix for older,
+# TOML-config releases. Both must point at the same hostname that
+# cloudflared/config.yml's ingress rule terminates.
 
 services:
 
@@ -27,6 +35,11 @@ services:
       - stalwart-data:/var/lib/stalwart
     environment:
       TZ: UTC
+      # Public hostname/URL the Cloudflare Tunnel terminates - must match
+      # the `hostname:` entry in cloudflared/config.yml's ingress rule and
+      # the [server.http].url / [server] hostname in stalwart/config.toml.
+      STALWART_HOSTNAME: mail.example.com
+      STALWART_PUBLIC_URL: https://mail.example.com
     networks:
       - mail
 
